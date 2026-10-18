@@ -120,7 +120,7 @@ async def on_message(message):
         if user_id not in user_sessions:
             try:
                 chat = client_gemini.chats.create(
-                    model="gemini-3.7-flash",  # Active model with fresh quota
+                    model="gemini-3.6-flash",  # Active model with fresh quota
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_PROMPT,
                         temperature=0.7
