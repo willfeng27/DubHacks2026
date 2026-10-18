@@ -53,6 +53,14 @@ def format_duration(seconds):
         if seconds % size == 0:
             n = seconds // size
             return f"{n} {name}" + ("" if n == 1 else "s")
+        
+def matches_scam_keywords(text):
+    text = text.lower()
+
+    has_offer_word = re.search(r"\b(free|giveaway)\b", text)
+    has_item_word = re.search(r"\b(camera|sony|macbook)\b", text)
+
+    return bool(has_offer_word and has_item_word)
 
 
 # Initialize Gemini Client safely
@@ -70,6 +78,8 @@ bot = discord.Client(intents=intents)
 
 # Dictionary to manage unique session state per user ID
 user_sessions = {}
+
+contacted_users = set()  # Track users already contacted to avoid duplicates
 
 SYSTEM_PROMPT = """
 You are an assistant participating in a suspected Discord shipping-fee scam investigation.
@@ -182,14 +192,13 @@ async def session_timer(user_id, username, channel):
 
     # Remove the session so it's closed; a new DM later starts a fresh session
     session = user_sessions.pop(user_id, None)
-    if session is None:
-        return
 
     # smtplib is blocking, so run it in a thread to keep the bot responsive
     await asyncio.to_thread(
         send_email_report, user_id, username,
         session["history_log"], session["collected_data"]
     )
+    contacted_users.discard(user_id)
     time_label = format_duration(SESSION_TIME_LIMIT)
     await channel.send(
         "Session closed because " + time_label + " has passed and report has been dispatched."
@@ -205,6 +214,45 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+    
+    if message.guild is not None:
+        if not matches_scam_keywords(message.content):
+            return
+
+        user_id = message.author.id
+
+        # Only contact each user once
+        if user_id in contacted_users:
+            return
+
+        # Mark the user before sending to prevent duplicate inquiries
+        contacted_users.add(user_id)
+
+        # Wait briefly before engaging
+        await asyncio.sleep(5)
+
+        try:
+            await message.author.send(
+                "Hi! I saw your message about the free item. Is it still available?"
+            )
+            print(f"DM sent to {message.author} ({user_id})")
+
+        except discord.Forbidden:
+            print(f"Could not DM {message.author}: DMs are disabled.")
+
+        except discord.HTTPException as e:
+            print(f"Failed to send DM: {e}")
+
+        # Delete the suspected scam message independently of the DM
+        try:
+            await message.delete()
+            print(f"Scam message from {message.author} deleted.")
+        except discord.Forbidden:
+            print("Could not delete message: missing permissions.")
+        except discord.HTTPException as e:
+            print(f"Failed to delete scam message: {e}")
+
+        return
 
     # Restrict processing to Direct Messages only
     if isinstance(message.channel, discord.DMChannel):
@@ -216,7 +264,7 @@ async def on_message(message):
         if user_id not in user_sessions:
             try:
                 chat = client_gemini.chats.create(
-                    model="gemini-3.7-flash",  # Active model with fresh quota
+                    model="gemini-3.5-flash-lite",  # Active model with fresh quota
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_PROMPT,
                         temperature=0.7
@@ -250,6 +298,7 @@ async def on_message(message):
 
         # Manual session close and report command
         if user_text.lower().strip() == "!end_session":
+            contacted_users.discard(user_id)
             send_email_report(user_id, username, session["history_log"], session["collected_data"])
             await message.channel.send("Session closed and report dispatched.")
             return
